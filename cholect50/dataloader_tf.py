@@ -38,6 +38,12 @@ import numpy as np
 from PIL import Image
 import tensorflow as tf
 
+SEQUENCE_DEPTH = 16
+
+# Generator Output: [sequence of images],  # 100 6 10 15 100 
+GENERATOR_OUTPUT_TYPE = (tf.float32, (tf.int32, tf.float32, tf.int32, tf.int32, tf.int32))
+GENERATOR_OUTPUT_SHAPE = ([None, 256, 448,3], ([None, 100], [None, 6], [None, 10], [None, 15], [None, 100]))
+
 
 class CholecT50():
     def __init__(self, 
@@ -46,6 +52,7 @@ class CholecT50():
                 test_fold=1,
                 augmentation_list=['original', 'vflip', 'hflip', 'contrast', 'rot90'],
                 normalize=True,
+                num_sequence = SEQUENCE_DEPTH,
                 num_parallel_calls=8):
         """ Args
                 dataset_dir : common path to the dataset (excluding videos, output)
@@ -76,6 +83,7 @@ class CholecT50():
             train_videos = train_videos[:-5]
         else:
             val_videos   = video_split['val']
+        self.sequence_depth = num_sequence
         self.train_records = ['VID{}'.format(str(v).zfill(2)) for v in train_videos]
         self.val_records   = ['VID{}'.format(str(v).zfill(2)) for v in val_videos]
         self.test_records  = ['VID{}'.format(str(v).zfill(2)) for v in test_videos]
@@ -87,17 +95,16 @@ class CholecT50():
 
     def split_selector(self, case='cholect50'):
         switcher = {
-            'cholect50': {
-                'train': [1, 15, 26, 40, 52, 65, 79, 2, 18, 27, 43, 56, 66, 92, 4, 22, 31, 47, 57, 68, 96, 5, 23, 35, 48, 60, 70, 103, 13, 25, 36, 49, 62, 75, 110],
-                'val'  : [8, 12, 29, 50, 78],
-                'test' : [6, 51, 10, 73, 14, 74, 32, 80, 42, 111]
-            },
-            """
+            # 'cholect50': {
+            #     'train': [1, 15, 26, 40, 52, 65, 79, 2, 18, 27, 43, 56, 66, 92, 4, 22, 31, 47, 57, 68, 96, 5, 23, 35, 48, 60, 70, 103, 13, 25, 36, 49, 62, 75, 110],
+            #     'val'  : [8, 12, 29, 50, 78],
+            #     'test' : [6, 51, 10, 73, 14, 74, 32, 80, 42, 111]
+            # },
             'cholect50': {
                 'train': [13, 25, 36, 49, 62, 75, 110],
                 'val'  : [8, 12],
                 'test' : [6, 51, 10]
-            },"""
+            },
             'cholect50-challenge': {
                 'train': [1, 15, 26, 40, 52, 79, 2, 27, 43, 56, 66, 4, 22, 31, 47, 57, 68, 23, 35, 48, 60, 70, 13, 25, 49, 62, 75, 8, 12, 29, 50, 78, 6, 51, 10, 73, 14, 32, 80, 42],
                 'val':   [5, 18, 36, 65, 74],
@@ -196,6 +203,16 @@ class CholecT50():
     
     def generator(self, records):
         for record in records:
+            
+            # We will flush the images from previous record if
+            # there are not enough number of depth to fill self.sequence_depth
+            image_list = []
+            ivt_list = []
+            i_list = []
+            v_list = []
+            t_list = []
+            p_list = []
+            
             video_path = os.path.join(self.dataset_dir, "videos/{}".format(record.decode("utf-8")))
             label_file = os.path.join(self.dataset_dir, "labels/{}.json".format(record.decode("utf-8")))
             label_data = json.load(open(label_file, "rb"))
@@ -211,17 +228,37 @@ class CholecT50():
                 #labels   = label_data["annotations"][frame]
                 labels   = label_data[frame]
                 ivt, i, v, t, p = self.get_binary_labels(labels)
+                
+                image = tf.keras.utils.img_to_array(image)
+                
+                
+                image_list.append(image)
+                ivt_list.append(ivt)
+                i_list.append(i)
+                v_list.append(v)
+                t_list.append(t)
+                p_list.append(p)
+                
+                if len(image_list) == self.sequence_depth:
+                    yield image_list, (ivt_list, i_list, v_list, t_list, p_list)
+                    image_list = []
+                    ivt_list = []
+                    i_list = []
+                    v_list = []
+                    t_list = []
+                    p_list = []
+                
                 #print(frame, len(ivt), len(i), len(v), len(t), len(p))
-                yield image, (ivt, i, v, t, p)           
+                              
 
     def build_train_dataset(self):
         self.train_dataset = tf.data.Dataset.from_generator(
                 self.generator,
                 args = [self.train_records],
                 #output_types = (tf.float32, (tf.int32, tf.int32, tf.int32, tf.int32, tf.int32)), -> changed from int32 to float32
-                output_types = (tf.float32, (tf.int32, tf.float32, tf.int32, tf.int32, tf.int32)),
+                output_types = GENERATOR_OUTPUT_TYPE,
                 # 100 6 10 15 100 
-                output_shapes = ([256, 448,3], ([100], [6], [10], [15], [100]))
+                output_shapes = GENERATOR_OUTPUT_SHAPE
                 # output_shapes = ([256, 448,3], ([6], [10], [15], [100], [7]))
                 
             )
@@ -231,8 +268,8 @@ class CholecT50():
         self.val_dataset = tf.data.Dataset.from_generator(
                 self.generator,
                 args = [self.val_records],
-                output_types = (tf.float32, (tf.int32, tf.float32, tf.int32, tf.int32, tf.int32)),
-                output_shapes = ([256, 448,3], ([100], [6], [10], [15], [100]))
+                output_types = GENERATOR_OUTPUT_TYPE,
+                output_shapes = GENERATOR_OUTPUT_SHAPE
             )
         self.val_dataset = self.val_dataset.map(self.augmentation, num_parallel_calls=self.num_parallel_calls)   
 
@@ -242,8 +279,8 @@ class CholecT50():
             test_dataset = tf.data.Dataset.from_generator(
                 self.generator,
                 args = [[video]],
-                output_types = (tf.float32, (tf.int32, tf.float32, tf.int32, tf.int32, tf.int32)),
-                output_shapes = ([256, 448,3], ([100], [6], [10], [15], [100]))
+                output_types = GENERATOR_OUTPUT_TYPE,
+                output_shapes = GENERATOR_OUTPUT_SHAPE
             )
             self.test_dataset.append(test_dataset)
 
